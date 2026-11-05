@@ -1,0 +1,124 @@
+//! This file includes benchmarks for tree creation
+use criterion::{criterion_group, criterion_main, Bencher, BenchmarkId, Criterion};
+use rand::prelude::*;
+use rand_chacha::ChaCha8Rng;
+use std::hint::black_box;
+use std::time::Instant;
+use taffy::prelude::*;
+use taffy::style::Style;
+use taffy_benchmarks::{benchmark_group, iter_timed};
+
+#[cfg(feature = "yoga")]
+use slotmap::SlotMap;
+#[cfg(feature = "yoga")]
+use taffy_benchmarks::yoga_helpers;
+#[cfg(feature = "yoga")]
+use yoga_helpers::yg;
+
+/// Build a random leaf node
+fn build_random_leaf(taffy: &mut TaffyTree) -> NodeId {
+    taffy.new_with_children(Style::DEFAULT, &[]).unwrap()
+}
+
+/// A tree with many children that have shallow depth
+fn build_taffy_flat_hierarchy(total_node_count: u32, use_with_capacity: bool) -> (TaffyTree, NodeId) {
+    let mut taffy =
+        if use_with_capacity { TaffyTree::with_capacity(total_node_count as usize) } else { TaffyTree::new() };
+    let mut rng = ChaCha8Rng::seed_from_u64(12345);
+    let mut children = Vec::new();
+    let mut node_count = 0;
+
+    while node_count < total_node_count {
+        let sub_children_count = rng.random_range(1..=4);
+        let sub_children: Vec<NodeId> = (0..sub_children_count).map(|_| build_random_leaf(&mut taffy)).collect();
+        let node = taffy.new_with_children(Style::DEFAULT, &sub_children).unwrap();
+
+        children.push(node);
+        node_count += 1 + sub_children_count;
+    }
+
+    let root = taffy.new_with_children(Style::DEFAULT, children.as_slice()).unwrap();
+    (taffy, root)
+}
+
+#[cfg(feature = "yoga")]
+/// A tree with many children that have shallow depth
+fn build_yoga_flat_hierarchy(total_node_count: u32) -> (yg::YogaTree, yg::NodeId) {
+    let mut tree = SlotMap::new();
+    let mut rng = ChaCha8Rng::seed_from_u64(12345);
+    let mut children = Vec::new();
+    let mut node_count = 0;
+
+    while node_count < total_node_count {
+        let sub_children_count = rng.random_range(1..=4);
+        let sub_children: Vec<yg::NodeId> =
+            (0..sub_children_count).map(|_| yoga_helpers::new_default_style_with_children(&mut tree, &[])).collect();
+        let node = yoga_helpers::new_default_style_with_children(&mut tree, &sub_children);
+
+        children.push(node);
+        node_count += 1 + sub_children_count;
+    }
+
+    let root = yoga_helpers::new_default_style_with_children(&mut tree, &children);
+    (tree, root)
+}
+
+#[cfg(feature = "cephal")]
+fn build_cephal_flat_hierarchy(total_node_count: u32, use_with_capacity: bool) -> (cephal::Tree, cephal::NodeId) {
+    let mut tree =
+        if use_with_capacity { cephal::Tree::with_capacity(total_node_count as usize) } else { cephal::Tree::new() };
+    let mut rng = ChaCha8Rng::seed_from_u64(12345);
+    let mut children = Vec::new();
+    let mut node_count = 0;
+    while node_count < total_node_count {
+        let sub_children_count = rng.random_range(1..=4);
+        let sub_children: Vec<_> =
+            (0..sub_children_count).map(|_| tree.new_with_children(cephal::Style::DEFAULT, &[])).collect();
+        children.push(tree.new_with_children(cephal::Style::DEFAULT, &sub_children));
+        node_count += 1 + sub_children_count;
+    }
+    let root = tree.new_with_children(cephal::Style::DEFAULT, &children);
+    (tree, root)
+}
+
+/// Benchmark creating a tree, without also timing how long it takes to drop it
+fn bench_creation<T>(b: &mut Bencher, build: impl Fn() -> T) {
+    iter_timed(b, || {
+        let start = Instant::now();
+        let tree = black_box(build());
+        let elapsed = start.elapsed();
+        drop(tree);
+        elapsed
+    })
+}
+
+fn taffy_benchmarks(c: &mut Criterion) {
+    let mut group = benchmark_group(c, "Tree creation");
+    for node_count in [1_000u32, 10_000, 100_000].iter() {
+        #[cfg(feature = "cephal")]
+        for (name, use_with_capacity) in [("cephal::Tree::new", false), ("cephal::Tree::with_capacity", true)] {
+            group.bench_with_input(BenchmarkId::new(name, node_count), node_count, |b, &node_count| {
+                bench_creation(b, || build_cephal_flat_hierarchy(node_count, use_with_capacity))
+            });
+        }
+        #[cfg(feature = "yoga")]
+        let benchmark_id = BenchmarkId::new(format!("Yoga"), node_count);
+        #[cfg(feature = "yoga")]
+        group.bench_with_input(benchmark_id, node_count, |b, &node_count| {
+            bench_creation(b, || build_yoga_flat_hierarchy(node_count))
+        });
+        let benchmark_id = BenchmarkId::new("TaffyTree::new".to_string(), node_count);
+        group.bench_with_input(benchmark_id, node_count, |b, &node_count| {
+            bench_creation(b, || build_taffy_flat_hierarchy(node_count, false))
+        });
+
+        let benchmark_id = BenchmarkId::new("TaffyTree::with_capacity".to_string(), node_count);
+        group.bench_with_input(benchmark_id, node_count, |b, &node_count| {
+            bench_creation(b, || build_taffy_flat_hierarchy(node_count, true))
+        });
+    }
+    group.finish();
+}
+
+criterion_group!(name = benches; config = taffy_benchmarks::criterion_config(); targets = taffy_benchmarks);
+criterion_main!(benches);
